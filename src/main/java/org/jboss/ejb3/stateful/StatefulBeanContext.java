@@ -49,6 +49,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -139,6 +141,17 @@ public class StatefulBeanContext
    
    private transient Transaction currentSyncTx;
    private transient List<Synchronization> synchronizations;
+
+   private final ReentrantLock invocationLock = new ReentrantLock();
+   private final Queue<Integer> callbackQueue = new ConcurrentLinkedQueue<Integer>();
+
+   Queue<Integer> getCallbackQueue() {
+      return callbackQueue;
+   }
+
+   ReentrantLock getInvocationLock() {
+      return invocationLock;
+   }
 
    /**
     * An incoming context from serialization.
