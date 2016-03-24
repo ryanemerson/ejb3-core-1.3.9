@@ -27,7 +27,6 @@ import org.jboss.ejb.AllowedOperationsAssociation;
 import org.jboss.ejb3.BeanContext;
 import org.jboss.ejb3.context.CurrentInvocationContext;
 import org.jboss.ejb3.context.base.BaseSessionInvocationContext;
-import org.jboss.ejb3.context.spi.InvocationContext;
 import org.jboss.ejb3.context.spi.SessionInvocationContext;
 import org.jboss.ejb3.tx.TxUtil;
 import org.jboss.logging.Logger;
@@ -41,6 +40,7 @@ import javax.transaction.SystemException;
 import javax.transaction.Transaction;
 import javax.transaction.TransactionManager;
 import java.rmi.RemoteException;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Comment
@@ -79,7 +79,7 @@ public class SessionSynchronizationInterceptor implements Interceptor
          // The bean might be lost in action if an exception is thrown in afterBegin
          if(bean == null)
             return;
-         pushEnc();
+         pushEnc(ctx);
          try
          {
             // FIXME: This is a dirty hack to notify AS EJBTimerService about what's going on
@@ -116,75 +116,27 @@ public class SessionSynchronizationInterceptor implements Interceptor
          finally
          {
             AllowedOperationsAssociation.popInMethodFlag();
-            popEnc();
+            popEnc(ctx);
          }
       }
 
       public void afterCompletion(final int status)
       {
-         ctx.setTxSynchronized(false);
-         final SessionSynchronization bean = (SessionSynchronization) ctx.getInstance();
-         // The bean might be lost in action if an exception is thrown in afterBegin
-         if(bean == null)
-            return;
-         pushEnc();
-         try
-         {
-            // TODO: use interceptors to setup a context
-            SessionInvocationContext invocation = new BaseSessionInvocationContext(null, null, null) {
-               @Override
-               public Object proceed() throws Exception
-               {
-                  if (status == Status.STATUS_COMMITTED)
-                  {
-                     bean.afterCompletion(true);
-                  }
-                  else
-                  {
-                     bean.afterCompletion(false);
-                  }
-                  return null;
-               }
-            };
-            invocation.setEJBContext(ctx.getEJBContext());
-            CurrentInvocationContext.push(invocation);
-            try
-            {
-               invocation.proceed();
+         ReentrantLock invocationLock = ctx.getInvocationLock();
+         ctx.getCallbackQueue().add(status);
+         if (!invocationLock.tryLock()) {
+            return; // Delay afterCompletion execution so that it is executed by StatefulInstanceInterceptor
+         }
+
+         try {
+            synchronized (ctx) {
+               Integer callbackStatus = ctx.getCallbackQueue().poll();
+               if (callbackStatus != null)
+                  executeAfterCompletion(ctx, callbackStatus);
             }
-            finally
-            {
-               CurrentInvocationContext.pop();
-            }
+         } finally {
+            invocationLock.unlock();
          }
-         catch(RuntimeException e)
-         {
-            throw e;
-         }
-         catch (Exception ignore)
-         {
-         }
-         finally
-         {
-            popEnc();
-            StatefulContainer container = (StatefulContainer) ctx.getContainer();
-            container.getCache().release(ctx);
-         }
-      }
-      
-      private void popEnc()
-      {
-         StatefulContainer container = ctx.getContainer();
-         BeanContext<?> old = container.popContext();
-         assert old == ctx;
-         container.popEnc();
-      }
-      
-      private void pushEnc()
-      {
-         StatefulContainer container = ctx.getContainer();
-         container.pushEnc();
-         container.pushContext(ctx);
       }
    }
 
@@ -221,5 +173,51 @@ public class SessionSynchronizationInterceptor implements Interceptor
          registerSessionSynchronization(target);
       }
       return ejb.invokeNext();
+   }
+
+   public static void executeAfterCompletion(StatefulBeanContext ctx, final int status) {
+      ctx.setTxSynchronized(false);
+      final SessionSynchronization bean = (SessionSynchronization) ctx.getInstance();
+      // The bean might be lost in action if an exception is thrown in afterBegin
+      if (bean == null)
+         return;
+      pushEnc(ctx);
+      try {
+         // TODO: use interceptors to setup a context
+         SessionInvocationContext invocation = new BaseSessionInvocationContext(null, null, null) {
+            @Override
+            public Object proceed() throws Exception {
+               bean.afterCompletion(status == Status.STATUS_COMMITTED);
+               return null;
+            }
+         };
+         invocation.setEJBContext(ctx.getEJBContext());
+         CurrentInvocationContext.push(invocation);
+         try {
+            invocation.proceed();
+         } finally {
+            CurrentInvocationContext.pop();
+         }
+      } catch (RuntimeException e) {
+         throw e;
+      } catch (Exception ignore) {
+      } finally {
+         popEnc(ctx);
+         StatefulContainer container = (StatefulContainer) ctx.getContainer();
+         container.getCache().release(ctx);
+      }
+   }
+
+   private static void pushEnc(StatefulBeanContext ctx) {
+      StatefulContainer container = ctx.getContainer();
+      container.pushEnc();
+      container.pushContext(ctx);
+   }
+
+   private static void popEnc(StatefulBeanContext ctx) {
+      StatefulContainer container = ctx.getContainer();
+      BeanContext<?> old = container.popContext();
+      assert old == ctx;
+      container.popEnc();
    }
 }

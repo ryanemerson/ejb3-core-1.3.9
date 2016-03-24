@@ -25,11 +25,13 @@ import java.rmi.RemoteException;
 
 import javax.ejb.ConcurrentAccessException;
 import javax.ejb.EJBException;
+import javax.transaction.Transaction;
 
 import org.jboss.aop.joinpoint.Invocation;
 import org.jboss.aop.joinpoint.MethodInvocation;
 import org.jboss.ejb3.annotation.SerializedConcurrentAccess;
 import org.jboss.ejb3.aop.AbstractInterceptor;
+import org.jboss.ejb3.tx.TxUtil;
 import org.jboss.logging.Logger;
 
 /**
@@ -72,11 +74,13 @@ public class StatefulInstanceInterceptor extends AbstractInterceptor
             target.setInInvocation(true);
          }
       }
-      ejb.setBeanContext(target);
-      StatefulBeanContext.currentBean.push(target);
-      container.pushContext(target);
+
+      target.getInvocationLock().lock();
       try
       {
+         ejb.setBeanContext(target);
+         StatefulBeanContext.currentBean.push(target);
+         container.pushContext(target);
          if (target.isDiscarded()) throw new EJBException("SFSB was discarded by another thread");
          return ejb.invokeNext();
       }
@@ -105,6 +109,19 @@ public class StatefulInstanceInterceptor extends AbstractInterceptor
             // nobody attached the bean to the tx and nobody discarded it
             if (!target.isTxSynchronized() && !target.isDiscarded()) container.getCache().release(target);
             if (block) target.getLock().unlock();
+
+            target.getInvocationLock().unlock();
+            if (target.isTxSynchronized() && target.getInvocationLock().getHoldCount() == 0) {
+               Integer callbackStatus = target.getCallbackQueue().poll();
+               if (callbackStatus != null) {
+                  try {
+                     SessionSynchronizationInterceptor.executeAfterCompletion(target, callbackStatus);
+                  } catch (Throwable t) {
+                     Transaction tx = TxUtil.getTransactionManager().getTransaction();
+                     log.error("Exception encountered when executing delayed afterCompletion callback for " + tx + ": " + t);
+                  }
+               }
+            }
          }
       }
    }
