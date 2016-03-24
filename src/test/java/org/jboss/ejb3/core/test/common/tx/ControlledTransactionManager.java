@@ -129,12 +129,12 @@ public class ControlledTransactionManager implements TransactionManager
 
    public void setTransactionTimeout(int timeout) throws SystemException
    {
-      throw new RuntimeException("NYI");
+      delegate.setTransactionTimeout(timeout);
    }
 
    public Transaction suspend() throws SystemException
    {
-      throw new RuntimeException("NYI");
+      return delegate.suspend();
    }
    
 }
